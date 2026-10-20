@@ -1,0 +1,99 @@
+--- a/kernel/ksud.c	2026-10-17 16:50:41.788387081 +0000
++++ b/kernel/ksud.c	2026-10-18 04:55:43.677881248 +0000
+@@ -294,6 +294,7 @@
+ static ssize_t (*orig_read_iter)(struct kiocb *, struct iov_iter *);
+ static struct file_operations fops_proxy;
+ static ssize_t read_count_append = 0;
++static bool rc_inserted = false;
+ 
+ static ssize_t read_proxy(struct file *file, char __user *buf, size_t count,
+ 			  loff_t *pos)
+@@ -363,7 +364,6 @@
+ 	}
+ 
+ 	// we only process the first read
+-	static bool rc_inserted = false;
+ 	if (rc_inserted) {
+ 		// we don't need this kprobe, unregister it!
+ 		stop_vfs_read_hook();
+@@ -416,6 +416,80 @@
+ 	return 0;
+ }
+ 
++
++/*
++ * Android 17 fix: init reads the rc file into a buffer sized from fstat().
++ * ksud's rc text is injected into the first read, so pad st_size by the
++ * injected length, otherwise init stops before the end of the file.
++ */
++#include <linux/stat.h>
++#include <linux/path.h>
++#include <linux/dcache.h>
++
++static void ksu_pad_rc_size(unsigned int fd, void __user *statbuf, int is64)
++{
++	struct file *file;
++	char *buf, *dpath;
++	long size, new_size;
++	void __user *st_size_ptr;
++	size_t len = sizeof(long);
++
++	if (!statbuf || rc_inserted)
++		return;
++
++	file = fget(fd);
++	if (!file)
++		return;
++
++	buf = kmalloc(PATH_MAX, GFP_KERNEL);
++	if (!buf) {
++		fput(file);
++		return;
++	}
++	dpath = d_path(&file->f_path, buf, PATH_MAX);
++	if (IS_ERR(dpath) || strcmp(dpath, "/system/etc/init/atrace.rc")) {
++		kfree(buf);
++		fput(file);
++		return;
++	}
++	kfree(buf);
++	fput(file);
++
++#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
++	if (is64) {
++		st_size_ptr = statbuf + offsetof(struct stat64, st_size);
++		len = sizeof(long long);
++	} else
++#endif
++		st_size_ptr = statbuf + offsetof(struct stat, st_size);
++
++	if (copy_from_user(&size, st_size_ptr, len))
++		return;
++	new_size = size + (long)strlen(KERNEL_SU_RC);
++	if (!copy_to_user(st_size_ptr, &new_size, len))
++		pr_info("fstat: padded st_size %ld -> %ld\n", size, new_size);
++}
++
++void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr)
++{
++#ifndef CONFIG_KSU_KPROBES_HOOK
++	if (likely(!ksu_vfs_read_hook))
++		return;
++#endif
++	ksu_pad_rc_size(*fd, *statbuf_ptr, 0);
++}
++
++#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
++void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr)
++{
++#ifndef CONFIG_KSU_KPROBES_HOOK
++	if (likely(!ksu_vfs_read_hook))
++		return;
++#endif
++	ksu_pad_rc_size((unsigned int)*fd, *statbuf_ptr, 1);
++}
++#endif
++
+ int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr,
+ 			size_t *count_ptr)
+ {
