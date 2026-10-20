@@ -1,0 +1,143 @@
+# Rebuilds the Redmi 8 (olive) kernel with KernelSU-Next + SUSFS 1.5.5 from public sources.
+# Repo root must contain: build16.config, susfs-1.5.5-kernel-side.patch, ksud-android17-fstat.patch
+# Parts were compile-tested one file at a time; a full link/boot has NOT been tested.
+name: Build Redmi 8 kernel (KSU-Next + SUSFS 1.5.5)
+
+on:
+  workflow_dispatch:
+
+env:
+  KERNEL_REPO: https://github.com/atsauban/kernel_msm-4.19.git
+  KERNEL_COMMIT: 5f52b15a4042cbe10f3894a4cf8b4d8d198453a0
+  UPSTREAM_REPO: https://github.com/Fucking-Projekt/android_kernel_xiaomi_mithorium.git
+  UPSTREAM_COMMIT: 1b00c058102e8fcefab2dae60c28bce5cc54eb89
+  KSU_REPO: https://github.com/sidex15/KernelSU-Next.git
+  KSU_COMMIT: a08c7bd792cd8776f371972ad00e260bb3a51ac3
+  SUSFS_REPO: https://github.com/Faheemvs/susfs4ksu.git
+  SUSFS_COMMIT: 4aed4b8eb2ac84b0df3f69036e90fa41a176b6dd
+  LLVM_VER: "20"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev \
+            cpio xz-utils lz4 zstd python3 gcc-aarch64-linux-gnu libncurses-dev git patch \
+            "clang-$LLVM_VER" "lld-$LLVM_VER" "llvm-$LLVM_VER"
+          echo "/usr/lib/llvm-$LLVM_VER/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch kernel (pinned)
+        run: |
+          mkdir kernel && cd kernel
+          git init -q
+          git remote add origin "$KERNEL_REPO"
+          git fetch --depth=1 origin "$KERNEL_COMMIT"
+          git checkout -q FETCH_HEAD
+          git log --oneline -1
+
+      - name: Add missing Wi-Fi/audio/camera driver folders from upstream mithorium
+        run: |
+          mkdir up && cd up
+          git init -q
+          git remote add origin "$UPSTREAM_REPO"
+          git fetch -q --depth=1 --filter=blob:none origin "$UPSTREAM_COMMIT"
+          git sparse-checkout init --cone
+          git sparse-checkout set drivers/staging/prima techpack/camera-legacy \
+            techpack/camera-legacy-m techpack/xiaomi-msm8937 techpack/xiaomi-sdm439 \
+            techpack/audio-legacy arch/arm64/boot/dts/vendor-legacy \
+            arch/arm64/boot/dts/xiaomi-msm8937 arch/arm64/boot/dts/xiaomi-sdm439
+          git checkout -q FETCH_HEAD
+          cd ..
+          for d in drivers/staging/prima techpack/camera-legacy techpack/camera-legacy-m \
+                   techpack/xiaomi-msm8937 techpack/xiaomi-sdm439 techpack/audio-legacy \
+                   arch/arm64/boot/dts/vendor-legacy arch/arm64/boot/dts/xiaomi-msm8937 \
+                   arch/arm64/boot/dts/xiaomi-sdm439; do
+            rm -rf "kernel/$d"
+            mkdir -p "kernel/$(dirname "$d")"
+            cp -a "up/$d" "kernel/$d"
+            test -n "$(ls "kernel/$d")"
+          done
+
+      - name: Add SUSFS 1.5.5 source files and kernel-side changes
+        run: |
+          git clone -q "$SUSFS_REPO" susfs4ksu
+          git -C susfs4ksu checkout -q "$SUSFS_COMMIT"
+          grep -q 'v1.5.5' susfs4ksu/kernel_patches/include/linux/susfs.h \
+            || { echo "::error::SUSFS source is not v1.5.5"; exit 1; }
+          cd kernel
+          git apply --check "$GITHUB_WORKSPACE/susfs-1.5.5-kernel-side.patch"
+          git apply "$GITHUB_WORKSPACE/susfs-1.5.5-kernel-side.patch"
+          # the patch contains the SUSFS source files; make sure they match the pinned v1.5.5
+          for f in fs/susfs.c fs/sus_su.c; do
+            cmp "$f" "../susfs4ksu/kernel_patches/$f"
+          done
+          for f in susfs.h susfs_def.h sus_su.h; do
+            cmp "include/linux/$f" "../susfs4ksu/kernel_patches/include/linux/$f"
+          done
+
+      - name: Fetch KernelSU-Next (SUSFS 1.5.5 branch) and add the Android 17 fstat fix
+        run: |
+          cd kernel
+          rm -rf KernelSU-Next
+          mkdir KernelSU-Next && cd KernelSU-Next
+          git init -q
+          git remote add origin "$KSU_REPO"
+          git fetch --depth=1 origin "$KSU_COMMIT"
+          git checkout -q FETCH_HEAD
+          git log --oneline -1
+          patch -p1 --dry-run < "$GITHUB_WORKSPACE/ksud-android17-fstat.patch"
+          patch -p1 < "$GITHUB_WORKSPACE/ksud-android17-fstat.patch"
+          cd ..
+          test -d drivers/kernelsu
+
+      - name: Configure
+        run: |
+          cd kernel
+          mkdir -p out
+          cp "$GITHUB_WORKSPACE/build16.config" out/.config
+          sed -i '/CONFIG_KSU_MANUAL_HOOK/d;/CONFIG_KSU_STATIC_HOOKS/d' out/.config
+          echo '# CONFIG_KSU_KPROBES_HOOK is not set' >> out/.config
+          echo '# CONFIG_KSU_SUSFS_SUS_SU is not set' >> out/.config
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          grep -E '^CONFIG_KSU|^# CONFIG_KSU' out/.config
+          grep -q '^CONFIG_KSU=y' out/.config
+          grep -q '^CONFIG_KSU_SUSFS=y' out/.config
+          grep -q '^CONFIG_PRONTO_WLAN=y' out/.config
+
+      - name: Build
+        run: |
+          set -o pipefail
+          cd kernel
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            KBUILD_BUILD_USER=builder KBUILD_BUILD_HOST=github \
+            Image.gz-dtb 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          # sanity checks: audio driver and KernelSU must be inside the kernel
+          strings out/arch/arm64/boot/Image | grep -q MultiMedia1 || { echo '::error::audio driver missing from kernel'; exit 1; }
+          strings out/arch/arm64/boot/Image | grep -q -i kernelsu || { echo '::error::KernelSU missing from kernel'; exit 1; }
+          sha256sum out/arch/arm64/boot/Image.gz-dtb | tee "$GITHUB_WORKSPACE/Image.gz-dtb.sha256"
+
+      - name: Upload result
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-result
+          path: |
+            kernel/out/arch/arm64/boot/Image.gz-dtb
+            kernel/out/.config
+            Image.gz-dtb.sha256
+            build.log
+
+      - name: Upload log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
