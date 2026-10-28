@@ -102,12 +102,14 @@ jobs:
           mkdir -p out
           cp "$GITHUB_WORKSPACE/build16.config" out/.config
           sed -i '/CONFIG_KSU_MANUAL_HOOK/d;/CONFIG_KSU_STATIC_HOOKS/d' out/.config
+          echo 'CONFIG_KSU_STATIC_HOOKS=y' >> out/.config
           echo '# CONFIG_KSU_KPROBES_HOOK is not set' >> out/.config
           echo '# CONFIG_KSU_SUSFS_SUS_SU is not set' >> out/.config
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
           grep -E '^CONFIG_KSU|^# CONFIG_KSU' out/.config
           grep -q '^CONFIG_KSU=y' out/.config
           grep -q '^CONFIG_KSU_SUSFS=y' out/.config
+          grep -q '^CONFIG_KSU_STATIC_HOOKS=y' out/.config
           grep -q '^CONFIG_PRONTO_WLAN=y' out/.config
 
       - name: Build
@@ -118,6 +120,9 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             KBUILD_BUILD_USER=builder KBUILD_BUILD_HOST=github \
             Image.gz-dtb 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          # the KernelSU hook calls must really be compiled into the kernel
+          llvm-nm out/fs/exec.o | grep -q ksu_handle_execveat || { echo '::error::KSU hooks are not compiled in'; exit 1; }
+          llvm-nm out/fs/stat.o | grep -q ksu_handle_newfstat_ret || { echo '::error::fstat hook not compiled in'; exit 1; }
           # sanity checks: audio driver and KernelSU must be inside the kernel
           strings out/arch/arm64/boot/Image | grep -q MultiMedia1 || { echo '::error::audio driver missing from kernel'; exit 1; }
           strings out/arch/arm64/boot/Image | grep -q -i kernelsu || { echo '::error::KernelSU missing from kernel'; exit 1; }
