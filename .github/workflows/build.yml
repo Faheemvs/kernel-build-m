@@ -1,7 +1,8 @@
-# Rebuilds the Redmi 8 (olive) kernel with KernelSU-Next + SUSFS 1.5.5 from public sources.
-# Repo root must contain: build16.config, susfs-1.5.5-kernel-side.patch, ksud-android17-fstat.patch
-# Parts were compile-tested one file at a time; a full link/boot has NOT been tested.
-name: Build Redmi 8 kernel (KSU-Next + SUSFS 1.5.5)
+# Rebuilds the Redmi 8 (olive) kernel with ReSukiSU (BakaSU) + SUSFS 2.3.0 from public sources.
+# Repo root must contain: build16.config, susfs-2.3.0-mithorium.patch
+# Every touched kernel file and the ReSukiSU driver were compile-tested one by one;
+# a full link/boot has NOT been tested.
+name: Build Redmi 8 kernel (ReSukiSU + SUSFS 2.3.0)
 
 on:
   workflow_dispatch:
@@ -11,8 +12,8 @@ env:
   KERNEL_COMMIT: 5f52b15a4042cbe10f3894a4cf8b4d8d198453a0
   UPSTREAM_REPO: https://github.com/Fucking-Projekt/android_kernel_xiaomi_mithorium.git
   UPSTREAM_COMMIT: 1b00c058102e8fcefab2dae60c28bce5cc54eb89
-  KSU_REPO: https://github.com/sidex15/KernelSU-Next.git
-  KSU_COMMIT: a08c7bd792cd8776f371972ad00e260bb3a51ac3
+  RESUKISU_REPO: https://github.com/ReSukiSU/ReSukiSU.git
+  RESUKISU_COMMIT: d5e9e025b8b49155f8014684d64c91742b465f65
   LLVM_VER: "20"
 
 jobs:
@@ -62,60 +63,79 @@ jobs:
             test -n "$(ls "kernel/$d")"
           done
 
-      - name: Add SUSFS 1.5.5 source files and kernel-side changes
+      - name: Add SUSFS 2.3.0 kernel-side changes (replaces the old KSU hooks)
         run: |
           cd kernel
-          git apply --check "$GITHUB_WORKSPACE/susfs-1.5.5-kernel-side.patch"
-          git apply "$GITHUB_WORKSPACE/susfs-1.5.5-kernel-side.patch"
-          # the patch itself carries fs/susfs.c and the headers; check the version inside
-          grep -q 'v1.5.5' include/linux/susfs.h || { echo "::error::SUSFS source is not v1.5.5"; exit 1; }
+          git apply --check "$GITHUB_WORKSPACE/susfs-2.3.0-mithorium.patch"
+          git apply "$GITHUB_WORKSPACE/susfs-2.3.0-mithorium.patch"
+          grep -q '"v2.3.0"' include/linux/susfs.h || { echo "::error::SUSFS source is not v2.3.0"; exit 1; }
           test -f fs/susfs.c && test -f include/linux/susfs_def.h
 
-      - name: Fetch KernelSU-Next (SUSFS 1.5.5 branch) and add the Android 17 fstat fix
+      - name: Fetch ReSukiSU (pinned, full history for the version number)
         run: |
           cd kernel
-          rm -rf KernelSU-Next
-          mkdir KernelSU-Next && cd KernelSU-Next
+          rm -rf ReSukiSU drivers/kernelsu
+          mkdir ReSukiSU && cd ReSukiSU
           git init -q
-          git remote add origin "$KSU_REPO"
-          git fetch --depth=1 origin "$KSU_COMMIT"
+          git remote add origin "$RESUKISU_REPO"
+          git fetch -q --filter=blob:none origin "$RESUKISU_COMMIT"
           git checkout -q FETCH_HEAD
           git log --oneline -1
-          patch -p1 --dry-run < "$GITHUB_WORKSPACE/ksud-android17-fstat.patch"
-          patch -p1 < "$GITHUB_WORKSPACE/ksud-android17-fstat.patch"
           cd ..
-          test -d drivers/kernelsu
+          ln -s ../ReSukiSU/kernel drivers/kernelsu
+          test -f drivers/kernelsu/Kconfig
 
       - name: Configure
         run: |
           cd kernel
           mkdir -p out
           cp "$GITHUB_WORKSPACE/build16.config" out/.config
-          sed -i '/CONFIG_KSU_MANUAL_HOOK/d;/CONFIG_KSU_STATIC_HOOKS/d' out/.config
-          echo 'CONFIG_KSU_STATIC_HOOKS=y' >> out/.config
-          echo '# CONFIG_KSU_KPROBES_HOOK is not set' >> out/.config
-          echo '# CONFIG_KSU_SUSFS_SUS_SU is not set' >> out/.config
+          # drop every old KernelSU / SUSFS option, then set the ReSukiSU + SUSFS 2.3.0 ones
+          sed -i -E '/^(# )?CONFIG_KSU/d' out/.config
+          cat >> out/.config <<'EOF'
+          CONFIG_KSU=y
+          CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@%REPO_NAME%"
+          CONFIG_KSU_MULTI_MANAGER_SUPPORT=y
+          # CONFIG_KSU_MANUAL_HOOK is not set
+          # CONFIG_KSU_TRACEPOINT_HOOK is not set
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          EOF
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
           grep -E '^CONFIG_KSU|^# CONFIG_KSU' out/.config
           grep -q '^CONFIG_KSU=y' out/.config
           grep -q '^CONFIG_KSU_SUSFS=y' out/.config
-          grep -q '^CONFIG_KSU_STATIC_HOOKS=y' out/.config
+          grep -q '^CONFIG_KSU_SUSFS_SUS_MAP=y' out/.config
+          ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config
           grep -q '^CONFIG_PRONTO_WLAN=y' out/.config
 
       - name: Build
         run: |
           set -o pipefail
           cd kernel
+          # generate include/generated/compile.h first, ReSukiSU's core/init.c includes it
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- init/version.o
           make -j"$(nproc)" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             KBUILD_BUILD_USER=builder KBUILD_BUILD_HOST=github \
             Image.gz-dtb 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
-          # the KernelSU hook calls must really be compiled into the kernel
+          # the ReSukiSU / SUSFS hook calls must really be compiled into the kernel
           llvm-nm out/fs/exec.o | grep -q ksu_handle_execveat || { echo '::error::KSU hooks are not compiled in'; exit 1; }
-          llvm-nm out/fs/stat.o | grep -q ksu_handle_newfstat_ret || { echo '::error::fstat hook not compiled in'; exit 1; }
-          # sanity checks: audio driver and KernelSU must be inside the kernel
+          llvm-nm out/fs/stat.o | grep -q ksu_handle_vfs_fstat || { echo '::error::fstat hook not compiled in'; exit 1; }
+          llvm-nm out/fs/susfs.o | grep -q susfs || { echo '::error::SUSFS is not compiled in'; exit 1; }
+          llvm-nm out/vmlinux | grep -q ksu_handle_execveat || { echo '::error::ReSukiSU missing from kernel'; exit 1; }
+          # sanity check: the audio driver must be inside the kernel
           strings out/arch/arm64/boot/Image | grep -q MultiMedia1 || { echo '::error::audio driver missing from kernel'; exit 1; }
-          strings out/arch/arm64/boot/Image | grep -q -i kernelsu || { echo '::error::KernelSU missing from kernel'; exit 1; }
+          grep -E 'SUSFS_VERSION|susfs_inline|susfs_feature_check' "$GITHUB_WORKSPACE/build.log" || true
           sha256sum out/arch/arm64/boot/Image.gz-dtb | tee "$GITHUB_WORKSPACE/Image.gz-dtb.sha256"
 
       - name: Upload result
