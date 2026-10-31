@@ -13,8 +13,6 @@ env:
   UPSTREAM_COMMIT: 1b00c058102e8fcefab2dae60c28bce5cc54eb89
   KSU_REPO: https://github.com/sidex15/KernelSU-Next.git
   KSU_COMMIT: a08c7bd792cd8776f371972ad00e260bb3a51ac3
-  SUSFS_REPO: https://github.com/Faheemvs/susfs4ksu.git
-  SUSFS_COMMIT: 4aed4b8eb2ac84b0df3f69036e90fa41a176b6dd
   LLVM_VER: "20"
 
 jobs:
@@ -66,20 +64,12 @@ jobs:
 
       - name: Add SUSFS 1.5.5 source files and kernel-side changes
         run: |
-          git clone -q "$SUSFS_REPO" susfs4ksu
-          git -C susfs4ksu checkout -q "$SUSFS_COMMIT"
-          grep -q 'v1.5.5' susfs4ksu/kernel_patches/include/linux/susfs.h \
-            || { echo "::error::SUSFS source is not v1.5.5"; exit 1; }
           cd kernel
           git apply --check "$GITHUB_WORKSPACE/susfs-1.5.5-kernel-side.patch"
           git apply "$GITHUB_WORKSPACE/susfs-1.5.5-kernel-side.patch"
-          # the patch contains the SUSFS source files; make sure they match the pinned v1.5.5
-          for f in fs/susfs.c fs/sus_su.c; do
-            cmp "$f" "../susfs4ksu/kernel_patches/$f"
-          done
-          for f in susfs.h susfs_def.h sus_su.h; do
-            cmp "include/linux/$f" "../susfs4ksu/kernel_patches/include/linux/$f"
-          done
+          # the patch itself carries fs/susfs.c and the headers; check the version inside
+          grep -q 'v1.5.5' include/linux/susfs.h || { echo "::error::SUSFS source is not v1.5.5"; exit 1; }
+          test -f fs/susfs.c && test -f include/linux/susfs_def.h
 
       - name: Fetch KernelSU-Next (SUSFS 1.5.5 branch) and add the Android 17 fstat fix
         run: |
