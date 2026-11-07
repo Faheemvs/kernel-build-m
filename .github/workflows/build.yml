@@ -85,6 +85,27 @@ jobs:
           ln -s ../ReSukiSU/kernel drivers/kernelsu
           test -f drivers/kernelsu/Kconfig
 
+      - name: Fix SUS_MOUNT crash bugs (atomic-safe ksu domain check, missing free_mark)
+        run: |
+          cd kernel
+          python3 - <<'PY'
+          p = 'ReSukiSU/kernel/selinux/selinux.c'
+          s = open(p).read()
+          old = 'bool susfs_is_current_ksu_domain(void)\n{\n    return is_ksu_domain();\n}'
+          new = 'bool susfs_is_current_ksu_domain(void)\n{\n    /* atomic-safe: compare the cached SID only, never the sleeping string fallback */\n    return cached_su_sid != 0 && current_sid() == cached_su_sid;\n}'
+          assert s.count(old) == 1, 'selinux.c pattern not found'
+          open(p, 'w').write(s.replace(old, new))
+          p = 'fs/susfs.c'
+          s = open(p).read()
+          old = 'static const struct fsnotify_ops fsnotify_ops = {\n\t.handle_event = susfs_handle_sdcard_inode_event,\n};'
+          new = 'static void susfs_sdcard_free_mark(struct fsnotify_mark *mark)\n{\n\tkfree(mark);\n}\n\nstatic const struct fsnotify_ops fsnotify_ops = {\n\t.handle_event = susfs_handle_sdcard_inode_event,\n\t.free_mark = susfs_sdcard_free_mark,\n};'
+          assert s.count(old) == 1, 'susfs.c pattern not found'
+          open(p, 'w').write(s.replace(old, new))
+          print('both fixes applied')
+          PY
+          grep -n 'free_mark' fs/susfs.c
+          grep -n 'cached_su_sid != 0 && current_sid' ReSukiSU/kernel/selinux/selinux.c
+
       - name: Configure
         run: |
           cd kernel
