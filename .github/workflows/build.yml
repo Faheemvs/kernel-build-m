@@ -1,8 +1,8 @@
-# SUSFS-LITE build: ReSukiSU (BakaSU) + SUSFS 2.3.0 with SUS_MOUNT and SUS_MAP turned OFF.
+# SUSFS + SUS_MOUNT build: ReSukiSU (BakaSU) + SUSFS 2.3.0 with SUS_MOUNT ON, SUS_MAP still OFF.
 # Repo root must contain: build16.config, susfs-2.3.0-mithorium.patch (same as the full build)
 # Purpose: find out if the mount-hiding or map-hiding code causes the random restarts.
 # Every touched kernel file and the ReSukiSU driver were compile-tested; a full link/boot has NOT been tested.
-name: Build Redmi 8 kernel (ReSukiSU + SUSFS lite)
+name: Build Redmi 8 kernel (ReSukiSU + SUSFS mount)
 
 on:
   workflow_dispatch:
@@ -100,7 +100,7 @@ jobs:
           # CONFIG_KSU_TRACEPOINT_HOOK is not set
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
-          # CONFIG_KSU_SUSFS_SUS_MOUNT is not set
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
           CONFIG_KSU_SUSFS_SUS_KSTAT=y
           CONFIG_KSU_SUSFS_SPOOF_UNAME=y
           CONFIG_KSU_SUSFS_ENABLE_LOG=y
@@ -113,7 +113,7 @@ jobs:
           grep -E '^CONFIG_KSU|^# CONFIG_KSU' out/.config
           grep -q '^CONFIG_KSU=y' out/.config
           grep -q '^CONFIG_KSU_SUSFS=y' out/.config
-          ! grep -q '^CONFIG_KSU_SUSFS_SUS_MOUNT=y' out/.config
+          grep -q '^CONFIG_KSU_SUSFS_SUS_MOUNT=y' out/.config
           ! grep -q '^CONFIG_KSU_SUSFS_SUS_MAP=y' out/.config
           ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config
           grep -q '^CONFIG_PRONTO_WLAN=y' out/.config
@@ -148,7 +148,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-susfs-lite-result
+          name: kernel-susfs-mount-result
           path: |
             kernel/out/arch/arm64/boot/Image.gz-dtb
             kernel/out/.config
