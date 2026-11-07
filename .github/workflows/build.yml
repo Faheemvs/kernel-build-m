@@ -1,8 +1,8 @@
-# Rebuilds the Redmi 8 (olive) kernel with ReSukiSU (BakaSU) + SUSFS 2.3.0 from public sources.
-# Repo root must contain: build16.config, susfs-2.3.0-mithorium.patch
-# Every touched kernel file and the ReSukiSU driver were compile-tested one by one;
-# a full link/boot has NOT been tested.
-name: Build Redmi 8 kernel (ReSukiSU + SUSFS 2.3.0)
+# SUSFS-LITE build: ReSukiSU (BakaSU) + SUSFS 2.3.0 with SUS_MOUNT and SUS_MAP turned OFF.
+# Repo root must contain: build16.config, susfs-2.3.0-mithorium.patch (same as the full build)
+# Purpose: find out if the mount-hiding or map-hiding code causes the random restarts.
+# Every touched kernel file and the ReSukiSU driver were compile-tested; a full link/boot has NOT been tested.
+name: Build Redmi 8 kernel (ReSukiSU + SUSFS lite)
 
 on:
   workflow_dispatch:
@@ -100,20 +100,21 @@ jobs:
           # CONFIG_KSU_TRACEPOINT_HOOK is not set
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          # CONFIG_KSU_SUSFS_SUS_MOUNT is not set
           CONFIG_KSU_SUSFS_SUS_KSTAT=y
           CONFIG_KSU_SUSFS_SPOOF_UNAME=y
           CONFIG_KSU_SUSFS_ENABLE_LOG=y
           CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
           CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          CONFIG_KSU_SUSFS_SUS_MAP=y
+          # CONFIG_KSU_SUSFS_SUS_MAP is not set
           EOF
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
           grep -E '^CONFIG_KSU|^# CONFIG_KSU' out/.config
           grep -q '^CONFIG_KSU=y' out/.config
           grep -q '^CONFIG_KSU_SUSFS=y' out/.config
-          grep -q '^CONFIG_KSU_SUSFS_SUS_MAP=y' out/.config
+          ! grep -q '^CONFIG_KSU_SUSFS_SUS_MOUNT=y' out/.config
+          ! grep -q '^CONFIG_KSU_SUSFS_SUS_MAP=y' out/.config
           ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config
           grep -q '^CONFIG_PRONTO_WLAN=y' out/.config
 
@@ -147,7 +148,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-result
+          name: kernel-susfs-lite-result
           path: |
             kernel/out/arch/arm64/boot/Image.gz-dtb
             kernel/out/.config
