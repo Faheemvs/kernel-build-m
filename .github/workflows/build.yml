@@ -1,185 +1,80 @@
-# FULL SUSFS build: ReSukiSU (BakaSU) + SUSFS 2.3.0 with SUS_MOUNT and SUS_MAP ON, plus the SUS_MOUNT crash fixes.
-# Repo root must contain: build16.config, susfs-2.3.0-mithorium.patch (same as the full build)
-# Purpose: find out if the mount-hiding or map-hiding code causes the random restarts.
-# Every touched kernel file and the ReSukiSU driver were compile-tested; a full link/boot has NOT been tested.
-name: Build Redmi 8 kernel (ReSukiSU + SUSFS full fixed)
+# Build the ReSukiSU manager APK from the exact same commit as the kernel driver,
+# so manager versionCode/SUSFS lib always matches kernel_msm-4.19 (olive/SDM439).
+# Companion to "Build Redmi 8 kernel (ReSukiSU + SUSFS full fixed)" — keep
+# RESUKISU_COMMIT identical between the two workflows.
+name: Build ReSukiSU manager (matches kernel)
 
 on:
   workflow_dispatch:
 
 env:
-  KERNEL_REPO: https://github.com/atsauban/kernel_msm-4.19.git
-  KERNEL_COMMIT: 5f52b15a4042cbe10f3894a4cf8b4d8d198453a0
-  UPSTREAM_REPO: https://github.com/Fucking-Projekt/android_kernel_xiaomi_mithorium.git
-  UPSTREAM_COMMIT: 1b00c058102e8fcefab2dae60c28bce5cc54eb89
   RESUKISU_REPO: https://github.com/ReSukiSU/ReSukiSU.git
   RESUKISU_COMMIT: d5e9e025b8b49155f8014684d64c91742b465f65
-  LLVM_VER: "20"
 
 jobs:
-  build:
+  manager:
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install build tools
+      - name: Fetch ReSukiSU (pinned, full history for versionCode)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev \
-            cpio xz-utils lz4 zstd python3 gcc-aarch64-linux-gnu libncurses-dev git patch \
-            "clang-$LLVM_VER" "lld-$LLVM_VER" "llvm-$LLVM_VER"
-          echo "/usr/lib/llvm-$LLVM_VER/bin" >> "$GITHUB_PATH"
-
-      - name: Fetch kernel (pinned)
-        run: |
-          mkdir kernel && cd kernel
-          git init -q
-          git remote add origin "$KERNEL_REPO"
-          git fetch --depth=1 origin "$KERNEL_COMMIT"
-          git checkout -q FETCH_HEAD
-          git log --oneline -1
-
-      - name: Add missing Wi-Fi/audio/camera driver folders from upstream mithorium
-        run: |
-          mkdir up && cd up
-          git init -q
-          git remote add origin "$UPSTREAM_REPO"
-          git fetch -q --depth=1 --filter=blob:none origin "$UPSTREAM_COMMIT"
-          git sparse-checkout init --cone
-          git sparse-checkout set drivers/staging/prima techpack/camera-legacy \
-            techpack/camera-legacy-m techpack/xiaomi-msm8937 techpack/xiaomi-sdm439 \
-            techpack/audio-legacy arch/arm64/boot/dts/vendor-legacy \
-            arch/arm64/boot/dts/xiaomi-msm8937 arch/arm64/boot/dts/xiaomi-sdm439
-          git checkout -q FETCH_HEAD
-          cd ..
-          for d in drivers/staging/prima techpack/camera-legacy techpack/camera-legacy-m \
-                   techpack/xiaomi-msm8937 techpack/xiaomi-sdm439 techpack/audio-legacy \
-                   arch/arm64/boot/dts/vendor-legacy arch/arm64/boot/dts/xiaomi-msm8937 \
-                   arch/arm64/boot/dts/xiaomi-sdm439; do
-            rm -rf "kernel/$d"
-            mkdir -p "kernel/$(dirname "$d")"
-            cp -a "up/$d" "kernel/$d"
-            test -n "$(ls "kernel/$d")"
-          done
-
-      - name: Add SUSFS 2.3.0 kernel-side changes (replaces the old KSU hooks)
-        run: |
-          cd kernel
-          git apply --check "$GITHUB_WORKSPACE/susfs-2.3.0-mithorium.patch"
-          git apply "$GITHUB_WORKSPACE/susfs-2.3.0-mithorium.patch"
-          grep -q '"v2.3.0"' include/linux/susfs.h || { echo "::error::SUSFS source is not v2.3.0"; exit 1; }
-          test -f fs/susfs.c && test -f include/linux/susfs_def.h
-
-      - name: Fetch ReSukiSU (pinned, full history for the version number)
-        run: |
-          cd kernel
-          rm -rf ReSukiSU drivers/kernelsu
           mkdir ReSukiSU && cd ReSukiSU
           git init -q
           git remote add origin "$RESUKISU_REPO"
           git fetch -q --filter=blob:none origin "$RESUKISU_COMMIT"
           git checkout -q FETCH_HEAD
           git log --oneline -1
-          cd ..
-          ln -s ../ReSukiSU/kernel drivers/kernelsu
-          test -f drivers/kernelsu/Kconfig
 
-      - name: Fix SUS_MOUNT crash bugs (atomic-safe ksu domain check, missing free_mark)
-        run: |
-          cd kernel
-          python3 - <<'PY'
-          p = 'ReSukiSU/kernel/selinux/selinux.c'
-          s = open(p).read()
-          old = 'bool susfs_is_current_ksu_domain(void)\n{\n    return is_ksu_domain();\n}'
-          new = 'bool susfs_is_current_ksu_domain(void)\n{\n    /* atomic-safe: compare the cached SID only, never the sleeping string fallback */\n    return cached_su_sid != 0 && current_sid() == cached_su_sid;\n}'
-          assert s.count(old) == 1, 'selinux.c pattern not found'
-          open(p, 'w').write(s.replace(old, new))
-          p = 'fs/susfs.c'
-          s = open(p).read()
-          old = 'static const struct fsnotify_ops fsnotify_ops = {\n\t.handle_event = susfs_handle_sdcard_inode_event,\n};'
-          new = 'static void susfs_sdcard_free_mark(struct fsnotify_mark *mark)\n{\n\tkfree(mark);\n}\n\nstatic const struct fsnotify_ops fsnotify_ops = {\n\t.handle_event = susfs_handle_sdcard_inode_event,\n\t.free_mark = susfs_sdcard_free_mark,\n};'
-          assert s.count(old) == 1, 'susfs.c pattern not found'
-          open(p, 'w').write(s.replace(old, new))
-          print('both fixes applied')
-          PY
-          grep -n 'free_mark' fs/susfs.c
-          grep -n 'cached_su_sid != 0 && current_sid' ReSukiSU/kernel/selinux/selinux.c
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
 
-      - name: Configure
-        run: |
-          cd kernel
-          mkdir -p out
-          cp "$GITHUB_WORKSPACE/build16.config" out/.config
-          # drop every old KernelSU / SUSFS option, then set the ReSukiSU + SUSFS 2.3.0 ones
-          sed -i -E '/^(# )?CONFIG_KSU/d' out/.config
-          cat >> out/.config <<'EOF'
-          CONFIG_KSU=y
-          CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@%REPO_NAME%"
-          CONFIG_KSU_MULTI_MANAGER_SUPPORT=y
-          # CONFIG_KSU_MANUAL_HOOK is not set
-          # CONFIG_KSU_TRACEPOINT_HOOK is not set
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          CONFIG_KSU_SUSFS_SUS_MAP=y
-          EOF
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-          grep -E '^CONFIG_KSU|^# CONFIG_KSU' out/.config
-          grep -q '^CONFIG_KSU=y' out/.config
-          grep -q '^CONFIG_KSU_SUSFS=y' out/.config
-          grep -q '^CONFIG_KSU_SUSFS_SUS_MOUNT=y' out/.config
-          grep -q '^CONFIG_KSU_SUSFS_SUS_MAP=y' out/.config
-          ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config
-          grep -q '^CONFIG_PRONTO_WLAN=y' out/.config
+      - uses: android-actions/setup-android@v3
 
-      - name: Build
+      - name: Build manager APK
+        working-directory: ReSukiSU/manager
         run: |
-          set -o pipefail
-          cd kernel
-          # generate include/generated/compile.h first, ReSukiSU's core/init.c includes it
-          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- init/version.o
-          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            KBUILD_BUILD_USER=builder KBUILD_BUILD_HOST=github \
-            Image.gz-dtb 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
-          # Diagnostics only: print what the hook objects reference. These never block the
-          # artifact (written to files first, so grep -q cannot break the pipe under pipefail).
-          for o in fs/exec.o fs/stat.o fs/susfs.o; do
-            echo "== out/$o"
-            llvm-nm "out/$o" > /tmp/nm_obj.txt 2>&1 || true
-            grep -E 'ksu_|susfs_' /tmp/nm_obj.txt | head -25 || true
-          done
-          llvm-nm out/vmlinux > /tmp/nm_vmlinux.txt 2>&1 || true
-          if grep -q ksu_handle_execveat /tmp/nm_vmlinux.txt; then echo "OK: ReSukiSU is inside vmlinux"; else echo "::warning::ksu_handle_execveat not found in vmlinux"; fi
-          if grep -q susfs_ /tmp/nm_vmlinux.txt; then echo "OK: SUSFS is inside vmlinux"; else echo "::warning::susfs symbols not found in vmlinux"; fi
-          strings out/arch/arm64/boot/Image > /tmp/img_strings.txt
-          grep -q MultiMedia1 /tmp/img_strings.txt || { echo '::error::audio driver missing from kernel'; exit 1; }
-          grep -E 'SUSFS_VERSION|susfs_inline|susfs_feature_check' "$GITHUB_WORKSPACE/build.log" || true
-          sha256sum out/arch/arm64/boot/Image.gz-dtb | tee "$GITHUB_WORKSPACE/Image.gz-dtb.sha256"
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Check versionCode matches kernel's SUSFS driver
+        working-directory: ReSukiSU/manager
+        run: |
+          APK=$(find . -name '*release*unsigned*.apk' | head -1)
+          test -n "$APK" || { echo "::error::no unsigned release APK produced"; exit 1; }
+          $ANDROID_HOME/build-tools/*/aapt dump badging "$APK" | tee /tmp/badging.txt
+          grep -q "versionCode='35252'" /tmp/badging.txt || \
+            echo "::warning::versionCode differs from expected 35252 — check ReSukiSU commit history length matches kernel build"
+
+      - name: Sign with own keystore
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASS }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          echo "$KS_B64" | base64 -d > ks.jks
+          APK=$(find ReSukiSU/manager -name '*release*unsigned*.apk' | head -1)
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$BT/zipalign" -p 4 "$APK" aligned.apk
+          "$BT/apksigner" sign --ks ks.jks --ks-pass env:KS_PASS \
+            --ks-key-alias "$KEY_ALIAS" --out manager-signed.apk aligned.apk
+          "$BT/apksigner" verify manager-signed.apk
+          sha256sum manager-signed.apk | tee manager-signed.apk.sha256
 
       - name: Upload result
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-susfs-full-fixed-result
+          name: resukisu-manager-signed
           path: |
-            kernel/out/arch/arm64/boot/Image.gz-dtb
-            kernel/out/.config
-            Image.gz-dtb.sha256
-            build.log
+            manager-signed.apk
+            manager-signed.apk.sha256
 
-      - name: Upload log on failure
+      - name: Upload build log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
-          path: build.log
+          name: manager-build-log
+          path: ReSukiSU/manager/**/build/outputs/logs/*
           if-no-files-found: ignore
