@@ -40,28 +40,34 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon
 
-      - name: Check versionCode matches kernel's SUSFS driver
+      - name: Locate built APK
         working-directory: ReSukiSU/manager
         run: |
-          APK=$(find . -name '*release*unsigned*.apk' | head -1)
-          test -n "$APK" || { echo "::error::no unsigned release APK produced"; exit 1; }
-          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" | tee /tmp/badging.txt
+          echo "All APKs produced:"
+          find . -name "*.apk" -path "*/release/*"
+          APK=$(find . -name "*.apk" -path "*/release/*" | head -1)
+          test -n "$APK" || { echo "::error::no release APK found under app/build/outputs/apk/release"; find . -name "*.apk"; exit 1; }
+          echo "APK_PATH=$(readlink -f "$APK")" >> "$GITHUB_ENV"
+          echo "Found: $APK"
+
+      - name: Check versionCode matches kernel's SUSFS driver
+        run: |
+          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK_PATH" | tee /tmp/badging.txt
           grep -q "versionCode='35252'" /tmp/badging.txt || \
             echo "::warning::versionCode differs from expected 35252 — check ReSukiSU commit history length matches kernel build"
 
-      - name: Sign with own keystore
+      - name: Re-sign with own keystore (overwrites the debug-signature fallback)
         env:
           KS_B64: ${{ secrets.KEYSTORE_B64 }}
           KS_PASS: ${{ secrets.KEYSTORE_PASS }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
           echo "$KS_B64" | base64 -d > ks.jks
-          APK=$(find ReSukiSU/manager -name '*release*unsigned*.apk' | head -1)
           BT="$ANDROID_HOME/build-tools/34.0.0"
-          "$BT/zipalign" -p 4 "$APK" aligned.apk
+          "$BT/zipalign" -p -f 4 "$APK_PATH" aligned.apk
           "$BT/apksigner" sign --ks ks.jks --ks-pass env:KS_PASS \
             --ks-key-alias "$KEY_ALIAS" --out manager-signed.apk aligned.apk
-          "$BT/apksigner" verify manager-signed.apk
+          "$BT/apksigner" verify --print-certs manager-signed.apk
           sha256sum manager-signed.apk | tee manager-signed.apk.sha256
 
       - name: Upload result
