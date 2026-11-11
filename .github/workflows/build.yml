@@ -31,6 +31,8 @@ jobs:
           java-version: 21
 
       - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools build-tools;34.0.0"
 
       - name: Build manager APK
         working-directory: ReSukiSU/manager
@@ -43,7 +45,7 @@ jobs:
         run: |
           APK=$(find . -name '*release*unsigned*.apk' | head -1)
           test -n "$APK" || { echo "::error::no unsigned release APK produced"; exit 1; }
-          $ANDROID_HOME/build-tools/*/aapt dump badging "$APK" | tee /tmp/badging.txt
+          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" | tee /tmp/badging.txt
           grep -q "versionCode='35252'" /tmp/badging.txt || \
             echo "::warning::versionCode differs from expected 35252 — check ReSukiSU commit history length matches kernel build"
 
@@ -55,7 +57,7 @@ jobs:
         run: |
           echo "$KS_B64" | base64 -d > ks.jks
           APK=$(find ReSukiSU/manager -name '*release*unsigned*.apk' | head -1)
-          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          BT="$ANDROID_HOME/build-tools/34.0.0"
           "$BT/zipalign" -p 4 "$APK" aligned.apk
           "$BT/apksigner" sign --ks ks.jks --ks-pass env:KS_PASS \
             --ks-key-alias "$KEY_ALIAS" --out manager-signed.apk aligned.apk
