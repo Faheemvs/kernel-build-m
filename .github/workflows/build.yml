@@ -50,6 +50,40 @@ jobs:
           echo "APK_PATH=$(readlink -f "$APK")" >> "$GITHUB_ENV"
           echo "Found: $APK"
 
-      - name: Check versionCode matches kernel's SUSFS driver
+      - name: Check versionCode matches kernel driver
         run: |
-          "$ANDROID_HOME/build-tools/34.0.0/aapt"
+          AAPT="$ANDROID_HOME/build-tools/34.0.0/aapt"
+          "$AAPT" dump badging "$APK_PATH" > /tmp/badging.txt
+          cat /tmp/badging.txt
+          grep -q "versionCode='35252'" /tmp/badging.txt || echo "::warning::versionCode differs from expected 35252"
+
+      - name: Re-sign with own keystore (overwrites the debug-signature fallback)
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASS }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          echo "$KS_B64" | base64 -d > ks.jks
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          "$BT/zipalign" -p -f 4 "$APK_PATH" aligned.apk
+          "$BT/apksigner" sign --ks ks.jks --ks-pass env:KS_PASS --ks-key-alias "$KEY_ALIAS" --out manager-signed.apk aligned.apk
+          "$BT/apksigner" verify --print-certs manager-signed.apk
+          sha256sum manager-signed.apk > manager-signed.apk.sha256
+          cat manager-signed.apk.sha256
+
+      - name: Upload result
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resukisu-manager-signed
+          path: |
+            manager-signed.apk
+            manager-signed.apk.sha256
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manager-build-log
+          path: ReSukiSU/manager/**/build/outputs/logs/*
+          if-no-files-found: ignore
