@@ -1,8 +1,4 @@
-# Build the ReSukiSU manager APK from the exact same commit as the kernel driver,
-# so manager versionCode/SUSFS lib always matches kernel_msm-4.19 (olive/SDM439).
-# Companion to "Build Redmi 8 kernel (ReSukiSU + SUSFS full fixed)" — keep
-# RESUKISU_COMMIT identical between the two workflows.
-name: Build ReSukiSU manager (matches kernel)
+name: Build ReSukiSU manager (matches kernel, with ksud)
 
 on:
   workflow_dispatch:
@@ -10,11 +6,12 @@ on:
 env:
   RESUKISU_REPO: https://github.com/ReSukiSU/ReSukiSU.git
   RESUKISU_COMMIT: d5e9e025b8b49155f8014684d64c91742b465f65
+  RUST_TOOLCHAIN: nightly-2026-09-23
 
 jobs:
   manager:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Fetch ReSukiSU (pinned, full history for versionCode)
         run: |
@@ -24,6 +21,71 @@ jobs:
           git fetch -q --filter=blob:none origin "$RESUKISU_COMMIT"
           git checkout -q FETCH_HEAD
           git log --oneline -1
+
+      - name: Install Rust nightly toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rust-src
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Install Android NDK (for Rust cross-compilation)
+        run: |
+          echo "y" | sdkmanager --install "ndk;27.0.12077973" --sdk_root="$ANDROID_HOME" || true
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+
+      - name: Add Rust Android targets
+        run: |
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+
+      - name: Build ksud for arm64-v8a (primary target for Redmi 8 / olive)
+        working-directory: ReSukiSU/userspace/ksud
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        run: |
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android26-clang"
+          export CXX_aarch64_linux_android="$NDK_BIN/aarch64-linux-android26-clang++"
+          export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android26-clang"
+          cargo build --target aarch64-linux-android --release
+
+      - name: Build ksud for armeabi-v7a
+        working-directory: ReSukiSU/userspace/ksud
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        run: |
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_armv7_linux_androideabi="$NDK_BIN/armv7a-linux-androideabi26-clang"
+          export CXX_armv7_linux_androideabi="$NDK_BIN/armv7a-linux-androideabi26-clang++"
+          export AR_armv7_linux_androideabi="$NDK_BIN/llvm-ar"
+          export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$NDK_BIN/armv7a-linux-androideabi26-clang"
+          cargo build --target armv7-linux-androideabi --release
+
+      - name: Build ksud for x86_64
+        working-directory: ReSukiSU/userspace/ksud
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        run: |
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_x86_64_linux_android="$NDK_BIN/x86_64-linux-android26-clang"
+          export CXX_x86_64_linux_android="$NDK_BIN/x86_64-linux-android26-clang++"
+          export AR_x86_64_linux_android="$NDK_BIN/llvm-ar"
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$NDK_BIN/x86_64-linux-android26-clang"
+          cargo build --target x86_64-linux-android --release
+
+      - name: Place ksud binaries as libksud.so in jniLibs
+        working-directory: ReSukiSU
+        run: |
+          mkdir -p manager/app/src/main/jniLibs/arm64-v8a
+          mkdir -p manager/app/src/main/jniLibs/armeabi-v7a
+          mkdir -p manager/app/src/main/jniLibs/x86_64
+          cp userspace/ksud/target/aarch64-linux-android/release/ksud \
+             manager/app/src/main/jniLibs/arm64-v8a/libksud.so
+          cp userspace/ksud/target/armv7-linux-androideabi/release/ksud \
+             manager/app/src/main/jniLibs/armeabi-v7a/libksud.so
+          cp userspace/ksud/target/x86_64-linux-android/release/ksud \
+             manager/app/src/main/jniLibs/x86_64/libksud.so
+          echo "ksud binaries placed:"
+          find manager/app/src/main/jniLibs -name "libksud.so"
 
       - uses: actions/setup-java@v4
         with:
@@ -40,15 +102,14 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon
 
-      - name: Locate built APK
+      - name: Verify libksud.so is inside the built APK
         working-directory: ReSukiSU/manager
         run: |
-          echo "All APKs produced:"
-          find . -name "*.apk" -path "*/release/*"
           APK=$(find . -name "*universal*release*.apk" -path "*/release/*" | head -1)
-          test -n "$APK" || { echo "::error::no universal release APK found under app/build/outputs/apk/release"; find . -name "*.apk"; exit 1; }
+          test -n "$APK" || { echo "::error::no universal release APK found"; exit 1; }
           echo "APK_PATH=$(readlink -f "$APK")" >> "$GITHUB_ENV"
-          echo "Found: $APK"
+          echo "Checking for libksud.so inside APK:"
+          unzip -l "$APK" | grep -i ksud || { echo "::error::libksud.so missing from APK!"; exit 1; }
 
       - name: Check versionCode matches kernel driver
         run: |
@@ -57,7 +118,7 @@ jobs:
           cat /tmp/badging.txt
           grep -q "versionCode='35252'" /tmp/badging.txt || echo "::warning::versionCode differs from expected 35252"
 
-      - name: Re-sign with own keystore (overwrites the debug-signature fallback)
+      - name: Re-sign with own keystore
         env:
           KS_B64: ${{ secrets.KEYSTORE_B64 }}
           KS_PASS: ${{ secrets.KEYSTORE_PASS }}
