@@ -7,6 +7,7 @@ env:
   RESUKISU_REPO: https://github.com/ReSukiSU/ReSukiSU.git
   RESUKISU_COMMIT: d5e9e025b8b49155f8014684d64c91742b465f65
   RUST_TOOLCHAIN: nightly-2026-09-23
+  NDK_VERSION: "27.0.12077973"
 
 jobs:
   manager:
@@ -22,26 +23,34 @@ jobs:
           git checkout -q FETCH_HEAD
           git log --oneline -1
 
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools build-tools;34.0.0 ndk;27.0.12077973"
+
       - name: Install Rust nightly toolchain
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rust-src
           rustup default "$RUST_TOOLCHAIN"
 
-      - name: Install Android NDK (for Rust cross-compilation)
-        run: |
-          echo "y" | sdkmanager --install "ndk;27.0.12077973" --sdk_root="$ANDROID_HOME" || true
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
-
       - name: Add Rust Android targets
         run: |
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
+      - name: Verify NDK toolchain exists
+        run: |
+          NDK_DIR="$ANDROID_HOME/ndk/$NDK_VERSION"
+          echo "NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          ls "$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/" | grep aarch64-linux-android26-clang
+
       - name: Build ksud for arm64-v8a (primary target for Redmi 8 / olive)
         working-directory: ReSukiSU/userspace/ksud
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
-          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          NDK_BIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android26-clang"
           export CXX_aarch64_linux_android="$NDK_BIN/aarch64-linux-android26-clang++"
           export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
@@ -50,10 +59,8 @@ jobs:
 
       - name: Build ksud for armeabi-v7a
         working-directory: ReSukiSU/userspace/ksud
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
-          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          NDK_BIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           export CC_armv7_linux_androideabi="$NDK_BIN/armv7a-linux-androideabi26-clang"
           export CXX_armv7_linux_androideabi="$NDK_BIN/armv7a-linux-androideabi26-clang++"
           export AR_armv7_linux_androideabi="$NDK_BIN/llvm-ar"
@@ -62,10 +69,8 @@ jobs:
 
       - name: Build ksud for x86_64
         working-directory: ReSukiSU/userspace/ksud
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
-          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          NDK_BIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           export CC_x86_64_linux_android="$NDK_BIN/x86_64-linux-android26-clang"
           export CXX_x86_64_linux_android="$NDK_BIN/x86_64-linux-android26-clang++"
           export AR_x86_64_linux_android="$NDK_BIN/llvm-ar"
@@ -86,15 +91,6 @@ jobs:
              manager/app/src/main/jniLibs/x86_64/libksud.so
           echo "ksud binaries placed:"
           find manager/app/src/main/jniLibs -name "libksud.so"
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-
-      - uses: android-actions/setup-android@v3
-        with:
-          packages: "platform-tools build-tools;34.0.0"
 
       - name: Build manager APK
         working-directory: ReSukiSU/manager
